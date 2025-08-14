@@ -1,0 +1,192 @@
+function [signal, thetas, phis] = mytrepr(Sys, Exp)
+
+    [Sys, Exp] = parsein(Sys, Exp);
+    dip = Sys.dip;
+    nThetas = Exp.nThetas;
+    nPhis = Exp.nPhis;
+    Exp.nSolidAngles = nThetas*nPhis;
+
+    % Grid
+    [thetas, phis] = createthetaphigrid(nThetas, nPhis, Exp.gridType);
+    % Sys = getallthetaphicombinations(Sys, thetas, phis);
+
+    % Direction of B0
+    rVers = ang2vec(ones(nThetas, 1)*phis, thetas*ones(1, nPhis));
+    % Effective g-values
+    g1Tensor = rotatematrixeuangles(diag(Sys.g(1, :)), Sys.gFrame(1, :));
+    g1s = sqrt( sum( (g1Tensor*rVers).^2, 1));
+    g2Tensor = rotatematrixeuangles(diag(Sys.g(2, :)), Sys.gFrame(2, :));    
+    g2s = sqrt( sum( (g2Tensor*rVers).^2, 1));
+    % Dipolar interaction
+    zD = erot(Sys.eeFrame)*[0, 0, 1]';
+    dipolars = dipinteraction(dip, rVers, zD);
+
+    % Hyperfine: A plus (Apl) array (Apls) and A minus (Amin) array (Amins) 
+    [Apls, Amins, probNucHfis] = calculateaplusaminus( ...
+        Sys.A, Sys.AFrame, rVers, Sys.nEquivNucs);
+
+    Exp.rVers = rVers;
+    Sys.thetas = thetas;
+    Sys.phis = phis;
+    Sys.g1s = g1s;
+    Sys.g2s = g2s;
+    Sys.dipolars = dipolars;
+    Sys.zD = zD;
+    Sys.Apls = Apls;
+    Sys.Amins = Amins;
+    Sys.probNucHfis = probNucHfis;
+    
+    signal = signaltrepr(Sys, Exp);
+end
+
+%% SIGNALTREPR
+function signal = signaltrepr(Sys, Exp)
+    
+    gInhBroadening = Exp.gInhBroadening;
+    if gInhBroadening
+        N_GINH = 100;
+        lw1 = mt2mhz(Sys.lw1);
+        lw2 = mt2mhz(Sys.lw2);
+        glw1 = freq2gvalue(mean(Exp.x), lw1);
+        glw2 = freq2gvalue(mean(Exp.x), lw2);
+        rng(0, "twister")  % Set random seed to 0 for reproducibility
+    else
+        N_GINH = 1;
+        glw1 = 0;
+        glw2 = 0;
+    end
+    g1s = Sys.g1s;
+    g2s = Sys.g2s;
+    dipolars = Sys.dipolars;
+    zD = Sys.zD;
+    JJ = Sys.J;
+    % The linewidth are square, following Zech's convention
+    trlwpp1 = (mt2mhz(Sys.trlwpp1)*1e-3)^2;
+    trlwpp2 = (mt2mhz(Sys.trlwpp2)*1e-3)^2;
+
+    nEquivNucs = Sys.nEquivNucs;
+    nHfiLines = prod(nEquivNucs + 1);
+    Apls = Sys.Apls;
+    Amins = Sys.Amins;
+    probNucHfis = Sys.probNucHfis;
+
+    rhoInit = Sys.rho;
+    
+    fieldAxis = Exp.x;
+    nFields = Exp.nPoints;
+    nSolidAngles = Exp.nSolidAngles;
+    rVers = Exp.rVers;
+    mwFreq = Exp.mwFreq;
+
+    %% Spectrum
+    signal = zeros(nSolidAngles, nFields, 4);
+    ts = datetime("now", 'Format', 'HH:mm:ss');
+    fprintf("%s: Start parfor: \n", ts)
+    for ii = 1:nSolidAngles
+        % The general convention of dimensions for matrices: the indeces are
+        % (igInh, iField, itrans) (except for signal)
+        if gInhBroadening
+            % Get numbers from gaussian distribution centered at g1 and g2
+            g1rand = normrnd(g1s(ii), glw1, [N_GINH, 1]);
+            g2rand = normrnd(g2s(ii), glw2, [N_GINH, 1]);
+            gpls = 1/2*(g1rand + g2rand);   % (N_GINH, 1)
+            gmins = 1/2*(g1rand - g2rand);  % (N_GINH, 1)
+        else
+            gpls = 1/2*(g1s(ii) + g2s(ii));
+            gmins = 1/2*(g1s(ii) - g2s(ii));
+        end
+        
+        w0s = gvalue2freq(fieldAxis, gpls);  % (N_GINH, nField) 
+        deltaws = gvalue2freq(fieldAxis, gmins); % (N_GINH, nField)
+
+        % Variables at the given iSolidAngle
+        Apl = Apls(:, ii);
+        Amin = Amins(:, ii);
+        dipolar = dipolars(ii);
+        
+        %%
+        for ihfi = 1:nHfiLines
+            % Variables that are scalars at the given ihfi
+            probNucHfi = probNucHfis(ihfi);
+            Ap = Apl(ihfi);
+            Am = Amin(ihfi);
+
+            % In the for loop, the variables that change are called with
+            % the convention "om" instead of "w"
+            om0s = w0s + Ap;
+            deltaoms = deltaws + Am;
+            bigOmegas = hypot(deltaoms, JJ + dipolar/2).*sign(deltaoms);
+            omResons = myeigenenergies(om0s, JJ, dipolar, bigOmegas);
+            intensityResons = intensityresonance(rhoInit, rVers(:, ii), ...
+                    deltaoms, JJ, dipolar, zD);
+
+            for itrans = 1:4
+                %% Calculate new resonance transition
+                % Transition 1 character, must be multiplied to SQUARE OF
+                % LWPP following Zech's convention
+                transChar1 = 0.5*(1 + deltaoms./bigOmegas);
+                if itrans < 3
+                    resonLwpp = transChar1*trlwpp2 + ...
+                        (1 - transChar1)*trlwpp1;
+                else
+                    resonLwpp = transChar1*trlwpp1 + ...
+                        (1 - transChar1)*trlwpp2;
+                end
+                newSig = gaussianresonancebsweep( ...
+                    omResons(:, :, itrans)*1e-3, mwFreq, ...
+                    resonLwpp, "lwpp");
+
+                % Multiply by scaling factors
+                newSig = squeeze(intensityResons(:, :, itrans)).*newSig*probNucHfi;
+                % Sum all (eventual) gInh contributions
+                newSig = sum(newSig, 1);
+
+                % Sum to previous signal
+                signal(ii, :, itrans) = signal(ii, :, itrans) + newSig;    
+            end
+        end 
+    end
+end
+
+function Sys = getallthetaphicombinations(Sys)
+    for it = 1:Exp.nThetas
+        for ip = 1:Exp.nPhis
+            if it == 1 && ip == 1
+                Sys.thetasphis{1} = [thetas(1), phis(1)];
+            else
+                Sys.thetasphis{end + 1} = [thetas(it), phis(ip)];
+            end
+        end
+    end
+end
+
+function [Sys, Exp] = parsein(Sys, Exp)
+    % Sys
+    Sys = getrhofromparamfile(Sys);
+    if isfield(Sys, "A") && nnz(Sys.A)
+        Sys.isHfi = 1;
+        if ~isfield(Sys, 'nEquivNucs')
+            Sys.nEquivNucs = ones(1, size(A, 1));
+        end
+    else
+        Sys.isHfi = 0;
+        Sys.nEquivNucs = 0;
+    end
+    if ~isfield(Sys, "gFrame")
+        Sys.gFrame = zeros(2, 3);
+    end
+
+    % Exp
+    if ~isfield(Exp, 'gInhBroadening')
+        Exp.gInhBroadening = 0;
+    end
+    if ~isfield(Exp, "nThetas")
+        Exp.nThetas = 40;
+    end
+    if ~isfield(Exp, "nPhis")
+        Exp.nPhis = 20;
+    end
+    if ~isfield(Exp, 'gridType')
+        Exp.gridType = 'zech';
+    end
+end

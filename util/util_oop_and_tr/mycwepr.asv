@@ -1,0 +1,91 @@
+function [signal, thetas, phis] = mycwepr(Sys, Exp)
+
+    [Sys, Exp] = parsein(Sys, Exp);
+    nThetas = Exp.nThetas;
+    nPhis = Exp.nPhis;
+    Exp.nSolidAngles = nThetas*nPhis;
+
+    % Grid
+    [thetas, phis] = createthetaphigrid(nThetas, nPhis, Exp.gridType);
+    % Sys = getallthetaphicombinations(Sys, thetas, phis);
+
+    % Direction of B0
+    rVers = ang2vec(ones(nThetas, 1)*phis, thetas*ones(1, nPhis));
+    % Effective g-values
+    gTensor = rotatematrixeuangles(diag(Sys.g(1, :)), Sys.gFrame(1, :));
+    gs = sqrt( (gTensor*rVers).^2 );
+
+    % The linewidth are square, following Zech's convention
+    cwlwpp1 = (mt2mhz(Sys.cwlwpp)*1e-3)^2;
+    
+    fieldAxis = Exp.x;
+    nFields = Exp.nPoints;
+    nSolidAngles = Exp.nSolidAngles;
+    mwFreq = Exp.mwFreq;
+
+    %% Spectrum
+    signal = zeros(nSolidAngles, nFields);
+    ts = datetime("now", 'Format', 'HH:mm:ss');
+    fprintf("%s: Start parfor: \n", ts)
+    for ii = 1:nSolidAngles
+        omReson = (fieldAxis*1e-3).*gs(ii)*(bmagn*1e-6)/planck;  % MHz
+        signal(ii, :) = gaussianresonancebsweep( ...
+            omReson*1e-3, mwFreq, cwlwpp1, "lwpp");
+    end
+    % Apply strain
+    if isfield(Sys, "gStrain")
+        if isequal(size(Sys.gStrain), [1, 3])
+            gStrain = transpose(Sys.gStrain);
+        elseif isequal(size(Sys.gStrain), [3, 1])
+            gStrain = Sys.gStrain;
+        else
+            error("gStrain not applied because the size its not correct.")
+        end
+        gStrainEff = sqrt( sum( (gStrain.*rVers).^2, 1) );
+        xstep = Exp.x(2) - Exp.x(1);
+        for ii = 1:nSolidAngles
+            if gStrainEff(ii) ~= 0
+                gStrainEff(ii)
+                signal(ii, :) = convspec( ...
+                    signal(ii, :), xstep, gStrainEff(ii));
+            end
+        end
+    end
+end
+
+function [Sys, Exp] = parsein(Sys, Exp)
+    % Sys
+    Sys = getrhofromparamfile(Sys);
+    if isfield(Sys, "A") && nnz(Sys.A)
+        Sys.isHfi = 1;
+        if ~isfield(Sys, 'nEquivNucs')
+            Sys.nEquivNucs = ones(1, size(A, 1));
+        end
+    else
+        Sys.isHfi = 0;
+        Sys.nEquivNucs = 0;
+    end
+    if ~isfield(Sys, "gFrame")
+        Sys.gFrame = zeros(1, 3);
+    end
+    if ~isfield(Sys, "nThetas")
+        Sys.nThetas = 40;
+    end
+    if ~isfield(Sys, "nPhis")
+        Sys.nPhis = 20;
+    end
+
+    % Exp
+    if ~isfield(Exp, 'gInhBroadening')
+        Exp.gInhBroadening = 0;
+    end
+    if ~isfield(Exp, "nThetas")
+        Exp.nThetas = 40;
+    end
+    if ~isfield(Exp, "nPhis")
+        Exp.nPhis = 20;
+    end
+    if ~isfield(Exp, 'gridType')
+        Exp.gridType = 'zech';
+    end
+end

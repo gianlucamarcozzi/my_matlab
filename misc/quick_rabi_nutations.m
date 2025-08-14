@@ -1,8 +1,8 @@
 clearvars
-[x, y] = eprload("/home/gianluca/files/mnt/1/files/projects/temp/ee");
+[x, y] = eprload("/home/gianluca/files/mnt/1/files/projects/temp/ggg");
 
 expcos = @(xx, p) [exp(-xx/p(1)).*cos(2*pi*p(2)*xx), ones(numel(xx), 1)];
-fitOpt = optimoptions('lsqnonlin','Display','off');
+FitOpt = optimoptions('lsqnonlin','Display','off');
 
 w0 = 30*1e-3;
 p0 = [40, w0];
@@ -10,7 +10,7 @@ fitmodel = @(p) expcos(x, p);
 ydata = real(y);
 ydata = ydata/max(ydata);
 
-[yfit, pfit, pci] = lsqnonlin2steps(ydata, fitmodel, p0, fitOpt);
+[yfit, pfit, pci] = lsqnonlin2steps(ydata, fitmodel, p0, FitOpt);
 
 figure(111)
 clf
